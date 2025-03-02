@@ -1,1 +1,3 @@
 backend/email_analysis/.env
+.env
+backend/.env
