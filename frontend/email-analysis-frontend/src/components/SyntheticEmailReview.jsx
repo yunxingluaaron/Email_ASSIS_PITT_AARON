@@ -17,7 +17,15 @@ const SyntheticEmailReview = ({ syntheticEmails, onFeedback }) => {
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState('');
 
-  if (!syntheticEmails || Object.keys(syntheticEmails).length === 0) return null;
+  if (!syntheticEmails || Object.keys(syntheticEmails).length === 0) {
+    return (
+      <Paper elevation={3} sx={{ p: 4, mb: 4 }}>
+        <Typography variant="body1">
+          No synthetic emails generated yet. The system is still analyzing your style.
+        </Typography>
+      </Paper>
+    );
+  }
   
   const categories = Object.keys(syntheticEmails);
   
@@ -57,6 +65,28 @@ const SyntheticEmailReview = ({ syntheticEmails, onFeedback }) => {
     setSnackbarOpen(true);
   };
 
+  // Helper function to get email content, handling both string and object formats
+  const getEmailContent = (email) => {
+    if (typeof email === 'string') {
+      return email;
+    }
+    
+    if (email.content) {
+      return email.content;
+    }
+    
+    return JSON.stringify(email);
+  };
+  
+  // Helper function to get email ID, handling different formats
+  const getEmailId = (email, index) => {
+    if (email.id) {
+      return email.id;
+    }
+    
+    return `email_${index}`;
+  };
+
   return (
     <Paper elevation={3} sx={{ p: 4, mb: 4 }}>
       <Typography variant="h5" component="h2" gutterBottom>
@@ -64,7 +94,7 @@ const SyntheticEmailReview = ({ syntheticEmails, onFeedback }) => {
       </Typography>
       
       <Typography variant="body1" paragraph>
-        For each category, we've generated 10 sample emails that match your writing style. 
+        For each category, we've generated sample emails that match your writing style. 
         Please review them and provide feedback.
       </Typography>
       
@@ -100,7 +130,7 @@ const SyntheticEmailReview = ({ syntheticEmails, onFeedback }) => {
                       borderRadius: 1
                     }}
                   >
-                    {email.content || email}
+                    {getEmailContent(email)}
                   </Typography>
                 </CardContent>
                 <CardActions>
@@ -108,7 +138,10 @@ const SyntheticEmailReview = ({ syntheticEmails, onFeedback }) => {
                     startIcon={<ThumbUpIcon />} 
                     variant="contained" 
                     color="success"
-                    onClick={() => handleApprove(email, category)}
+                    onClick={() => handleApprove(
+                      { id: getEmailId(email, emailIndex), content: getEmailContent(email) }, 
+                      category
+                    )}
                   >
                     Approve
                   </Button>
@@ -116,7 +149,10 @@ const SyntheticEmailReview = ({ syntheticEmails, onFeedback }) => {
                     startIcon={<ThumbDownIcon />} 
                     variant="outlined" 
                     color="error"
-                    onClick={() => handleImprove(email, category)}
+                    onClick={() => handleImprove(
+                      { id: getEmailId(email, emailIndex), content: getEmailContent(email) },
+                      category
+                    )}
                   >
                     Needs Improvement
                   </Button>
@@ -134,7 +170,7 @@ const SyntheticEmailReview = ({ syntheticEmails, onFeedback }) => {
           <Box sx={{ mb: 3, mt: 1 }}>
             <Typography gutterBottom>How would you rate this email?</Typography>
             <Rating 
-              value={rating} 
+              value={rating / 20} 
               onChange={(event, newValue) => setRating(newValue * 20)} 
               precision={0.5} 
               max={5}

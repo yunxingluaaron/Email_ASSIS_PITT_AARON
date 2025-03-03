@@ -2,6 +2,7 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import current_app
+import traceback
 
 def get_db_connection():
     """
@@ -16,6 +17,201 @@ def get_db_connection():
 
 class DatabaseService:
     """Service class for database operations"""
+    
+    @staticmethod
+    def authenticate_user(email, password_hash):
+        """
+        Authenticate a user with email and password
+        
+        Args:
+            email: User email
+            password_hash: Hashed password
+            
+        Returns:
+            dict: User data if authenticated, None otherwise
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            cur.execute(
+                "SELECT id, email FROM users WHERE email = %s AND password_hash = %s",
+                (email, password_hash)
+            )
+            user = cur.fetchone()
+            return user
+        finally:
+            cur.close()
+            conn.close()
+    
+    @staticmethod
+    def get_user_by_email(email):
+        """
+        Get user by email
+        
+        Args:
+            email: User email
+            
+        Returns:
+            dict: User data if found, None otherwise
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            cur.execute(
+                "SELECT id, email FROM users WHERE email = %s",
+                (email,)
+            )
+            user = cur.fetchone()
+            return user
+        finally:
+            cur.close()
+            conn.close()
+    
+    @staticmethod
+    def create_user(email, password_hash):
+        """
+        Create a new user
+        
+        Args:
+            email: User email
+            password_hash: Hashed password
+            
+        Returns:
+            int: User ID if created, None otherwise
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            cur.execute(
+                "INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id",
+                (email, password_hash)
+            )
+            user_id = cur.fetchone()['id']
+            conn.commit()
+            return user_id
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
+    
+    @staticmethod
+    def store_session(user_id, session_token):
+        """
+        Store a user session
+        
+        Args:
+            user_id: User ID
+            session_token: Session token
+            
+        Returns:
+            bool: Success status
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            # Check if user_sessions table exists
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'user_sessions'
+                )
+            """)
+            table_exists = cur.fetchone()['exists']
+            
+            if not table_exists:
+                # Create the table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE user_sessions (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER REFERENCES users(id),
+                        session_token TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '7 days')
+                    )
+                """)
+                conn.commit()
+            
+            # Clear any existing sessions for this user
+            cur.execute(
+                "DELETE FROM user_sessions WHERE user_id = %s",
+                (user_id,)
+            )
+            
+            # Store the new session
+            cur.execute(
+                "INSERT INTO user_sessions (user_id, session_token) VALUES (%s, %s)",
+                (user_id, session_token)
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
+    
+    @staticmethod
+    def verify_session(user_id, session_token):
+        """
+        Verify a user session
+        
+        Args:
+            user_id: User ID
+            session_token: Session token
+            
+        Returns:
+            bool: True if session is valid, False otherwise
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            cur.execute(
+                "SELECT id FROM user_sessions WHERE user_id = %s AND session_token = %s AND expires_at > CURRENT_TIMESTAMP",
+                (user_id, session_token)
+            )
+            session = cur.fetchone()
+            return session is not None
+        finally:
+            cur.close()
+            conn.close()
+    
+    @staticmethod
+    def clear_session(user_id, session_token):
+        """
+        Clear a user session
+        
+        Args:
+            user_id: User ID
+            session_token: Session token
+            
+        Returns:
+            bool: Success status
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            cur.execute(
+                "DELETE FROM user_sessions WHERE user_id = %s AND session_token = %s",
+                (user_id, session_token)
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
     
     @staticmethod
     def get_or_create_user(user_identifier):
@@ -108,7 +304,7 @@ class DatabaseService:
     @staticmethod
     def save_style_analysis(user_id, style_analysis_json):
         """
-        Save style analysis to the database
+        Save style analysis to the database using SQLAlchemy model
         
         Args:
             user_id: User ID
@@ -117,24 +313,34 @@ class DatabaseService:
         Returns:
             int: Analysis ID
         """
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
         try:
-            cur.execute(
-                "INSERT INTO style_analysis (user_id, analysis_json) VALUES (%s, %s) RETURNING id",
-                (user_id, style_analysis_json)
-            )
-            analysis_id = cur.fetchone()['id']
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
-        finally:
-            cur.close()
-            conn.close()
+            from app.model.model import StyleAnalysis
+            from app.extensions import db
             
-        return analysis_id
+            # Check if user_id needs conversion from string to int
+            if isinstance(user_id, str) and user_id.isdigit():
+                user_id = int(user_id)
+            
+            # Create a new StyleAnalysis record
+            style_analysis = StyleAnalysis(
+                user_id=user_id,
+                analysis_data=style_analysis_json
+            )
+            
+            # Add to session and commit
+            db.session.add(style_analysis)
+            db.session.commit()
+            
+            print(f"DEBUG: Successfully saved StyleAnalysis for user_id: {user_id}")
+            print(f"DEBUG: New StyleAnalysis ID: {style_analysis.id}")
+            
+            return style_analysis.id
+        except Exception as e:
+            import traceback
+            print(f"ERROR in save_style_analysis: {str(e)}")
+            print(f"Traceback: {traceback.format_exc()}")
+            db.session.rollback()
+            raise e
     
     @staticmethod
     def save_synthetic_emails(user_id, synthetic_emails):
@@ -345,6 +551,250 @@ class DatabaseService:
         except Exception as e:
             conn.rollback()
             raise e
+        finally:
+            cur.close()
+            conn.close()
+    
+    @staticmethod
+    def get_approved_synthetic_emails(user_id):
+        """
+        Get approved synthetic emails for a user, organized by category
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            dict: Dictionary of approved synthetic emails by category
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            # Get approved synthetic emails
+            cur.execute(
+                "SELECT id, category, content FROM synthetic_emails WHERE user_id = %s AND approved = True",
+                (user_id,)
+            )
+            approved_emails = cur.fetchall()
+            
+            # Organize by category
+            emails_by_category = {}
+            for email in approved_emails:
+                category = email['category']
+                if category not in emails_by_category:
+                    emails_by_category[category] = []
+                
+                emails_by_category[category].append(email['content'])
+            
+            return emails_by_category if emails_by_category else None
+        finally:
+            cur.close()
+            conn.close()
+    
+# 4. Update the get_latest_style_analysis method to handle both field names
+    @staticmethod
+    def get_latest_style_analysis(user_id):
+        """
+        Get the latest style analysis for a user
+        
+        Args:
+            user_id: The user's ID
+            
+        Returns:
+            dict: Style analysis data or None if not found
+        """
+        print("\n" + "="*80)
+        print(f"DEBUG: get_latest_style_analysis called for user_id: {user_id}")
+        
+        try:
+            print(f"DEBUG: Importing StyleAnalysis model")
+            from app.model.model import StyleAnalysis
+            import json
+            print(f"DEBUG: Successfully imported StyleAnalysis model")
+            
+            # Print the user_id type to help with debugging
+            print(f"DEBUG: User ID type: {type(user_id)}")
+            
+            # Convert user_id to integer if it's a string
+            if isinstance(user_id, str) and user_id.isdigit():
+                user_id = int(user_id)
+                print(f"DEBUG: Converted user_id to integer: {user_id}")
+                
+            print(f"DEBUG: Querying database for StyleAnalysis with user_id: {user_id}")
+            
+            # Get the count first to verify if any records exist
+            analysis_count = StyleAnalysis.query.filter_by(user_id=user_id).count()
+            print(f"DEBUG: Found {analysis_count} StyleAnalysis records for user_id: {user_id}")
+            
+            if analysis_count == 0:
+                print(f"DEBUG: No StyleAnalysis found for user: {user_id}")
+                return None
+            
+            # Get the latest analysis
+            style_analysis = StyleAnalysis.query.filter_by(user_id=user_id).order_by(StyleAnalysis.created_at.desc()).first()
+            
+            print(f"DEBUG: Retrieved StyleAnalysis with ID: {style_analysis.id if style_analysis else None}")
+            
+            if style_analysis is None:
+                print(f"DEBUG: No StyleAnalysis found for user: {user_id}")
+                return None
+            
+            # Try to access analysis_data first (from the model definition)
+            if hasattr(style_analysis, 'analysis_data') and style_analysis.analysis_data:
+                print(f"DEBUG: Found analysis_data field")
+                try:
+                    if isinstance(style_analysis.analysis_data, str):
+                        print(f"DEBUG: Parsing analysis_data as JSON string")
+                        return json.loads(style_analysis.analysis_data)
+                    elif isinstance(style_analysis.analysis_data, dict):
+                        print(f"DEBUG: analysis_data is already a dictionary")
+                        return style_analysis.analysis_data
+                    else:
+                        print(f"DEBUG: Unexpected type for analysis_data: {type(style_analysis.analysis_data)}")
+                except json.JSONDecodeError as e:
+                    print(f"DEBUG: Error parsing analysis_data as JSON: {e}")
+            
+            # Fallback to analysis_json if the field exists (from SQL queries)
+            if hasattr(style_analysis, 'analysis_json') and style_analysis.analysis_json:
+                print(f"DEBUG: Using analysis_json field")
+                try:
+                    if isinstance(style_analysis.analysis_json, str):
+                        print(f"DEBUG: Parsing analysis_json as JSON string")
+                        return json.loads(style_analysis.analysis_json)
+                    elif isinstance(style_analysis.analysis_json, dict):
+                        print(f"DEBUG: analysis_json is already a dictionary")
+                        return style_analysis.analysis_json
+                    else:
+                        print(f"DEBUG: Unexpected type for analysis_json: {type(style_analysis.analysis_json)}")
+                except json.JSONDecodeError as e:
+                    print(f"DEBUG: Error parsing analysis_json as JSON: {e}")
+            
+            print(f"DEBUG: Could not extract valid style analysis data")
+            return None
+                
+        except Exception as e:
+            import traceback
+            print(f"DEBUG: Exception in get_latest_style_analysis: {str(e)}")
+            print(f"DEBUG: Exception traceback: {traceback.format_exc()}")
+            return None
+        finally:
+            print("="*80 + "\n")
+    
+    @staticmethod
+    def save_style_profile(user_id):
+        """
+        Save a user's approved synthetic emails as their permanent style profile
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            bool: Success status
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            # Check if user_style_profiles table exists
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'user_style_profiles'
+                )
+            """)
+            table_exists = cur.fetchone()['exists']
+            
+            if not table_exists:
+                # Create the table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE user_style_profiles (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER REFERENCES users(id),
+                        category VARCHAR(255) NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.commit()
+            
+            # Get user's approved synthetic emails
+            cur.execute(
+                "SELECT id, category, content FROM synthetic_emails WHERE user_id = %s AND approved = True",
+                (user_id,)
+            )
+            approved_emails = cur.fetchall()
+            
+            if not approved_emails:
+                return False
+            
+            # Clear any existing style profile for this user
+            cur.execute(
+                "DELETE FROM user_style_profiles WHERE user_id = %s",
+                (user_id,)
+            )
+            
+            # Save approved emails as style profile
+            for email in approved_emails:
+                cur.execute(
+                    "INSERT INTO user_style_profiles (user_id, category, content) VALUES (%s, %s, %s)",
+                    (user_id, email['category'], email['content'])
+                )
+            
+            conn.commit()
+            return True
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close()
+    
+    @staticmethod
+    def get_user_style_profile(user_id):
+        """
+        Get a user's style profile
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            dict: Style profile by category
+        """
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            # Check if table exists
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'user_style_profiles'
+                )
+            """)
+            table_exists = cur.fetchone()['exists']
+            
+            if not table_exists:
+                return None
+            
+            # Get style profile
+            cur.execute(
+                "SELECT id, category, content FROM user_style_profiles WHERE user_id = %s",
+                (user_id,)
+            )
+            profile_emails = cur.fetchall()
+            
+            # Organize by category
+            profile_by_category = {}
+            for email in profile_emails:
+                category = email['category']
+                if category not in profile_by_category:
+                    profile_by_category[category] = []
+                
+                profile_by_category[category].append(email['content'])
+            
+            return profile_by_category if profile_by_category else None
         finally:
             cur.close()
             conn.close()
